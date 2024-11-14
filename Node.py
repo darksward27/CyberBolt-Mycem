@@ -15,7 +15,11 @@ class Blockchain:
         self.wallets = {}
         self.token_counter = 0
 
+
         self.difficulty = 4
+        self.target_block_time = 60
+        self.last_adjustment_time = time()
+
         self.create_genesis_block()
 
     def create_genesis_block(self):
@@ -225,3 +229,42 @@ class Blockchain:
             return None
 
         return func(contract_state, params)
+
+
+    def deploy_contract(self, contract_name, contract_code):
+        """Deploy a smart contract to the blockchain."""
+        self.contracts[contract_name] = {'code': contract_code, 'state': {'donations': [], 'funds': {}}}
+        print(f"Contract '{contract_name}' deployed.")
+
+
+
+    def get_donation_contract_code(self):
+        """Returns the code for the Donation Contract."""
+        return """
+        def receive_donation(state, params):
+            donor = params.get('donor')
+            amount = params.get('amount')
+            project = params.get('project')
+            state['donations'].append({'donor': donor, 'amount': amount, 'project': project})
+            return state['donations']
+
+        def get_donations(state, params):
+            return state.get('donations', [])
+        """
+
+    def get_allocation_contract_code(self):
+        """Returns the code for the Allocation Contract."""
+        return """
+        def allocate_funds(state, params):
+            project = params.get('project')
+            amount = params.get('amount')
+            if project in state['funds']:
+                state['funds'][project] += amount
+            else:
+                state['funds'][project] = amount
+            return state['funds'][project]
+
+        def get_funds(state, params):
+            project = params.get('project')
+            return state['funds'].get(project, 0)
+        """

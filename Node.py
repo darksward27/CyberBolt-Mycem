@@ -1,6 +1,8 @@
 import threading
 import hashlib
-import time
+import json
+import uuid
+from time import time,sleep
 
 class Blockchain:
     def __init__(self):
@@ -12,7 +14,7 @@ class Blockchain:
         self.projects = {}
         self.wallets = {}
         self.token_counter = 0
-        
+
         self.difficulty = 4
         self.create_genesis_block()
 
@@ -74,3 +76,42 @@ class Blockchain:
             print(f"Decreasing difficulty to {self.difficulty}")
 
         self.last_adjustment_time = current_time
+
+
+    @staticmethod
+    def valid_proof(last_proof, proof, difficulty):
+        guess = f'{last_proof}{proof}'.encode()
+        guess_hash = hashlib.sha256(guess).hexdigest()
+        return guess_hash[:difficulty] == "0" * difficulty
+
+    @staticmethod
+    def hash(block):
+        block_string = json.dumps(block, sort_keys=True).encode()
+        return hashlib.sha256(block_string).hexdigest()
+
+    @property
+    def last_block(self):
+        return self.chain[-1]
+
+    def create_wallet(self, owner_name):
+        wallet_id = str(uuid.uuid4())
+        private_key = str(uuid.uuid4())
+        self.wallets[wallet_id] = {'owner': owner_name, 'balance': 1000, 'private_key': private_key}
+        print(f"Wallet created for {owner_name} with ID: {wallet_id}")
+        return wallet_id, private_key
+
+    def add_project(self, project_name):
+        if project_name in self.projects:
+            print("Project already exists.")
+        else:
+            wallet_id, private_key = self.create_wallet(project_name)
+            self.projects[project_name] = {
+                'total_donations': 0,
+                'wallet_id': wallet_id,
+                'donation_log': []
+            }
+            print(f"Project '{project_name}' added with wallet ID: {wallet_id}")
+
+
+b = Blockchain()
+b.add_project("Elder care")

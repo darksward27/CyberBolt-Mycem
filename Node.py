@@ -36,3 +36,16 @@ class Blockchain:
         self.chain.append(block)
         print(f"New block mined and added to the blockchain with index: {block['index']}")
         return block
+
+    def new_transaction(self, sender, recipient, amount, contract_name=None, function_name=None, params=None):
+        transaction = {
+            'sender': sender,
+            'recipient': recipient,
+            'amount': amount,
+            'contract': contract_name,
+            'function': function_name,
+            'params': params,
+        }
+        self.current_transactions.append(transaction)
+        return self.last_block['index'] + 1
+

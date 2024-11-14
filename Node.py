@@ -154,3 +154,74 @@ class Blockchain:
         self.current_transactions.append(donation_log_entry)
         print(f"Donation added with token ID: {token_id} to project '{project_name}' by {donor_wallet['owner']}")
         return token_id
+
+    def withdraw_funds(self, project_name, amount):
+        """Withdraw funds from a project's wallet for charity usage with a purpose."""
+        if project_name not in self.projects:
+            print("Project not found.")
+            return None
+
+        project_wallet_id = self.projects[project_name]['wallet_id']
+        project_wallet = self.wallets.get(project_wallet_id)
+
+        if project_wallet['balance'] < amount:
+            print("Insufficient funds in project wallet.")
+            return None
+
+        purpose = input("Enter the purpose of withdrawal: ")
+
+        project_wallet['balance'] -= amount
+
+        withdrawal_log_entry = {
+            'type': 'withdrawal',
+            'amount': amount,
+            'project': project_name,
+            'purpose': purpose,
+            'timestamp': time()
+        }
+        self.projects[project_name]['donation_log'].append(withdrawal_log_entry)
+        self.current_transactions.append(withdrawal_log_entry)
+        print(f"Withdrew {amount} from project '{project_name}' wallet for purpose: {purpose}.")
+
+    def track_funds(self, project_name):
+        if project_name not in self.projects:
+            print("Project not found.")
+            return
+
+        project_data = self.projects[project_name]
+        print(f"\nFunds Tracking for Project: {project_name}")
+        print(f"Total Donations: {project_data['total_donations']}")
+        print("Donation & Withdrawal Log:")
+        for entry in project_data['donation_log']:
+            print(entry)
+
+    def mine_block_periodically(self):
+        while True:
+            sleep(60)
+            if self.current_transactions:
+                last_proof = self.last_block['proof']
+                proof = self.proof_of_work(last_proof)
+                previous_hash = self.hash(self.last_block)
+                self.new_block(proof, previous_hash)
+                self.adjust_difficulty()
+            else:
+                print("No transactions to mine.")
+
+    def execute_contract(self, contract_name, function_name, params):
+        contract = self.contracts.get(contract_name)
+        if not contract:
+            print("Contract not found.")
+            return None
+
+        contract_code = contract['code']
+        contract_state = contract['state']
+
+        local_scope = {'state': contract_state, 'params': params}
+        exec(contract_code, {}, local_scope)
+
+        func = local_scope.get(function_name)
+        if not func:
+            print(f"Function '{function_name}' not found in contract '{contract_name}'.")
+            return None
+
+        return func(contract_state, params)

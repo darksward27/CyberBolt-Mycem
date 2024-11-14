@@ -3,6 +3,8 @@ import hashlib
 import json
 import uuid
 from time import time,sleep
+import pickle
+import socket
 
 class Blockchain:
     def __init__(self):
@@ -237,6 +239,17 @@ class Blockchain:
         print(f"Contract '{contract_name}' deployed.")
 
 
+    def show_deployed_contracts(self):
+        """Display all deployed contracts on the blockchain."""
+        if not self.contracts:
+            print("No contracts deployed.")
+        else:
+            print("\nDeployed Contracts:")
+            for contract_name, contract_data in self.contracts.items():
+                print(f"Contract Name: {contract_name}")
+                print("Contract Code:")
+                print(contract_data['code'])
+                print("----------")
 
     def get_donation_contract_code(self):
         """Returns the code for the Donation Contract."""
@@ -268,3 +281,56 @@ class Blockchain:
             project = params.get('project')
             return state['funds'].get(project, 0)
         """
+
+
+
+    def register_node(self, address):
+        """Add a new node to the list of nodes."""
+        self.nodes.add(address)
+        print(f"Node {address} added to the network.")
+
+    def resolve_conflicts(self):
+        new_chain = None
+        max_length = len(self.chain)
+
+        for node in self.nodes:
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.connect(node)
+                    s.sendall(pickle.dumps({"action": "chain"}))
+                    data = pickle.loads(s.recv(4096))
+
+                    length = data['length']
+                    chain = data['chain']
+
+                    if length > max_length and self.valid_chain(chain):
+                        max_length = length
+                        new_chain = chain
+
+            except Exception as e:
+                print(f"Error connecting to node {node}: {e}")
+
+        if new_chain:
+            self.chain = new_chain
+            print("Our chain was replaced with a longer valid chain.")
+            return True
+
+        print("Our chain is authoritative.")
+        return False
+
+    def valid_chain(self, chain):
+        last_block = chain[0]
+        current_index = 1
+
+        while current_index < len(chain):
+            block = chain[current_index]
+            if block['previous_hash'] != self.hash(last_block):
+                return False
+
+            if not self.valid_proof(last_block['proof'], block['proof'], self.difficulty):
+                return False
+
+            last_block = block
+            current_index += 1
+
+        return True

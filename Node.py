@@ -112,6 +112,45 @@ class Blockchain:
             }
             print(f"Project '{project_name}' added with wallet ID: {wallet_id}")
 
+    def check_wallet_balance(self, wallet_id):
+        wallet = self.wallets.get(wallet_id)
+        if wallet:
+            return wallet['balance']
+        else:
+            print("Wallet not found.")
+            return None
 
-b = Blockchain()
-b.add_project("Elder care")
+    def new_donation(self, wallet_id, amount, project_name):
+        if project_name not in self.projects:
+            print("Project not found.")
+            return None
+
+        donor_wallet = self.wallets.get(wallet_id)
+        if not donor_wallet:
+            print("Wallet not found.")
+            return None
+
+        if donor_wallet['balance'] < amount:
+            print("Insufficient balance in wallet.")
+            return None
+
+        donor_wallet['balance'] -= amount
+
+        project_wallet_id = self.projects[project_name]['wallet_id']
+        self.wallets[project_wallet_id]['balance'] += amount
+
+        token_id = f"donation_{self.token_counter}_{uuid.uuid4()}"
+        self.token_counter += 1
+        donation_log_entry = {
+            'type': 'donation',
+            'donor': donor_wallet['owner'],
+            'amount': amount,
+            'project': project_name,
+            'token_id': token_id,
+            'timestamp': time()
+        }
+        self.projects[project_name]['donation_log'].append(donation_log_entry)
+        self.projects[project_name]['total_donations'] += amount
+        self.current_transactions.append(donation_log_entry)
+        print(f"Donation added with token ID: {token_id} to project '{project_name}' by {donor_wallet['owner']}")
+        return token_id

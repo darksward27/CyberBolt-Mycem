@@ -12,6 +12,9 @@ class Blockchain:
         self.projects = {}
         self.wallets = {}
         self.token_counter = 0
+        
+        self.difficulty = 4
+        self.create_genesis_block()
 
     def create_genesis_block(self):
             genesis_block = {
@@ -49,3 +52,25 @@ class Blockchain:
         self.current_transactions.append(transaction)
         return self.last_block['index'] + 1
 
+    def proof_of_work(self, last_proof):
+        proof = 0
+        while not self.valid_proof(last_proof, proof, self.difficulty):
+            proof += 1
+        return proof
+
+    def adjust_difficulty(self):
+        if len(self.chain) < 2:
+            return
+
+        current_time = time()
+        time_taken = current_time - self.last_adjustment_time
+        expected_time = self.target_block_time * len(self.chain)
+        if time_taken < expected_time / 2:
+            self.difficulty += 1
+            print(f"Increasing difficulty to {self.difficulty}")
+
+        elif time_taken > expected_time * 2:
+            self.difficulty = max(1, self.difficulty - 1)
+            print(f"Decreasing difficulty to {self.difficulty}")
+
+        self.last_adjustment_time = current_time

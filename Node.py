@@ -13,7 +13,6 @@ class Blockchain:
         self.wallets = {}
         self.token_counter = 0
 
-
     def create_genesis_block(self):
             genesis_block = {
                 'index': 1,
@@ -24,3 +23,16 @@ class Blockchain:
             }
             self.chain.append(genesis_block)
             print("Genesis block created")
+
+    def new_block(self, proof, previous_hash=None):
+        block = {
+            'index': len(self.chain) + 1,
+            'timestamp': time(),
+            'transactions': self.current_transactions,
+            'proof': proof,
+            'previous_hash': previous_hash or self.hash(self.chain[-1]),
+        }
+        self.current_transactions = []
+        self.chain.append(block)
+        print(f"New block mined and added to the blockchain with index: {block['index']}")
+        return block

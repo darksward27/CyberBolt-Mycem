@@ -2,16 +2,19 @@ import threading
 import hashlib
 import json
 import uuid
-from time import time,sleep
+from time import sleep,time
 import pickle
 import socket
 import asyncio
-from aiohttp import web
-from jsonrpcserver import Result, Success, dispatch, method
+from aiohttp import web, ClientSession,ClientTimeout, ClientConnectorError
+from jsonrpcserver import Result, Success,async_dispatch as dispatch, method,Error
 import ecdsa
 import sha3
 from hashlib import sha256
+import netifaces
 
+peers = {}  # Format: {peer_ip: {'last_sync': timestamp}}
+blockchain = None 
 
 class Node:
     pass
@@ -403,40 +406,8 @@ class Blockchain:
 
 
 
-    def register_node(self, address):
-        self.nodes.add(address)
-        print(f"Node {address} added to the network.")
-
-    def resolve_conflicts(self):
-        new_chain = None
-        max_length = len(self.chain)
-
-        for node in self.nodes:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.connect(node)
-                    s.sendall(pickle.dumps({"action": "chain"}))
-                    data = pickle.loads(s.recv(4096))
-
-                    length = data['length']
-                    chain = data['chain']
-
-                    if length > max_length and self.valid_chain(chain):
-                        max_length = length
-                        new_chain = chain
-
-            except Exception as e:
-                print(f"Error connecting to node {node}: {e}")
-
-        if new_chain:
-            self.chain = new_chain
-            print("Our chain was replaced with a longer valid chain.")
-            return True
-
-        print("Our chain is authoritative.")
-        return False
-
     def valid_chain(self, chain):
+        """Determine if a given blockchain is valid."""
         last_block = chain[0]
         current_index = 1
 
@@ -452,6 +423,56 @@ class Blockchain:
             current_index += 1
 
         return True
+
+    def resolve_conflicts(self):
+        """Resolve conflicts by synchronizing with peers that have valid, longer chains."""
+        new_state = None
+        max_length = len(self.chain)
+
+        for peer in peers:
+            try:
+                peer_state = asyncio.run(fetch_chain_from_peer(peer))
+                if peer_state and len(peer_state.get('chain', [])) > max_length:
+                    if self.valid_chain(peer_state['chain']):
+                        max_length = len(peer_state['chain'])
+                        new_state = peer_state
+
+            except Exception as e:
+                print(f"Error retrieving state from peer {peer}: {e}")
+
+    def get_full_state(self):
+        """Get the complete state of the blockchain including all data structures."""
+        return {
+            'chain': self.chain,
+            'current_transactions': self.current_transactions,
+            'contracts': self.contracts,
+            'nodes': list(self.nodes),
+            'donation_tokens': self.donation_tokens,
+            'projects': self.projects,
+            'wallets': self.wallets,
+            'token_counter': self.token_counter,
+            'difficulty': self.difficulty
+        }
+
+    def update_state_from_peer(self, peer_state):
+        """Update the blockchain state with data from a peer."""
+        if not peer_state:
+            return False
+        
+        # Verify the chain is valid before updating
+        if self.valid_chain(peer_state.get('chain', [])):
+            if len(peer_state.get('chain', [])) > len(self.chain):
+                self.chain = peer_state['chain']
+                self.current_transactions = peer_state.get('current_transactions', [])
+                self.contracts = peer_state.get('contracts', {})
+                self.nodes = set(peer_state.get('nodes', []))
+                self.donation_tokens = peer_state.get('donation_tokens', {})
+                self.projects = peer_state.get('projects', {})
+                self.wallets = peer_state.get('wallets', {})
+                self.token_counter = peer_state.get('token_counter', 0)
+                self.difficulty = peer_state.get('difficulty', 4)
+                return True
+        return False
 
 
 def display_blockchain(blockchain):
@@ -511,38 +532,293 @@ def check_files(message: str) -> Result:
         return Success("No files Uploaded")
 
 
+@method
+async def hello(sender):
+    """JSON-RPC method to handle peer registration and initial state sync."""
+    try:
+        if sender not in peers and sender != local_ip:
+            peers[sender] = {'last_sync': 0}
+            print(f"New peer added: {sender}")
+            
+            # Immediately request state from the new peer
+            state = await fetch_chain_from_peer(sender)
+            if state:
+                blockchain.update_state_from_peer(state)
+                print(f"Initial state sync completed with peer {sender}")
+            
+            return Success({"message": f"Hello, {sender}! Added you as a peer.", 
+                          "current_state": blockchain.get_full_state()})
+    except Exception as e:
+        print(f"Error in hello method: {e}")
+        return Error(code=-32603, message=str(e))
+
+
+@method
+async def get_chain():
+    """JSON-RPC method to provide the complete blockchain state."""
+    try:
+        full_state = blockchain.get_full_state()
+        return Success(full_state)
+    except Exception as e:
+        print(f"Error getting chain state: {e}")
+        return Error(code=-32603, message=str(e))
+
+
+@method
+async def sync_state(state_data: dict) -> Result:
+    """JSON-RPC method to receive and process state updates from peers."""
+    try:
+        if blockchain.update_state_from_peer(state_data):
+            # Broadcast to other peers if state was updated
+            await broadcast_state_to_peers(state_data)
+            return Success("State synchronized and broadcast to peers")
+        return Success("Current state is up to date")
+    except Exception as e:
+        print(f"Error syncing state: {e}")
+        return Error(code=-32603, message=str(e))
+
+
+# JSON-RPC handler for handling incoming requests
 async def json_rpc_handler(request):
-    return web.Response(text=dispatch(await request.text()), content_type="application/json")
+    # Use async dispatch and do not await the text call twice
+    request_text = await request.text()
+    response = await dispatch(request_text)
+    return web.Response(text=str(response), content_type="application/json")
 
-server_ready = threading.Event()
+def remove_inactive_peer(peer_ip):
+    """Remove inactive peers from the peers list."""
+    if peer_ip in peers:
+        del peers[peer_ip]
+        print(f"Removed inactive peer: {peer_ip}")
 
 
+async def fetch_chain_from_peer(peer_ip):
+    """Fetch complete blockchain state from a peer with improved error handling."""
+    url = f"http://{peer_ip}:5000/jsonrpc"
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "get_chain",
+        "params": {},
+        "id": str(uuid.uuid4())
+    }
+    try:
+        timeout = ClientTimeout(total=30)  # Increased timeout for larger state transfers
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    response = await resp.json()
+                    if 'result' in response:
+                        print(f"Successfully fetched state from peer {peer_ip}")
+                        return response['result']
+                print(f"Invalid response from peer {peer_ip}: {resp.status}")
+    except asyncio.TimeoutError:
+        print(f"Timeout fetching state from peer {peer_ip}")
+        remove_inactive_peer(peer_ip)
+    except Exception as e:
+        print(f"Error fetching state from peer {peer_ip}: {e}")
+        remove_inactive_peer(peer_ip)
+    return None
+
+async def send_state_to_peer(peer, state_data):
+    """Send state to a single peer with error handling."""
+    url = f"http://{peer}:5000/jsonrpc"
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "sync_state",
+        "params": state_data,
+        "id": str(uuid.uuid4())
+    }
+    try:
+        timeout = ClientTimeout(total=30)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    peers[peer]['last_sync'] = time()
+                    print(f"Successfully broadcast state to peer {peer}")
+                else:
+                    print(f"Failed to broadcast state to peer {peer}: {resp.status}")
+    except Exception as e:
+        print(f"Error broadcasting state to peer {peer}: {e}")
+        remove_inactive_peer(peer)
+
+async def broadcast_state_to_peers(state_data):
+    """Broadcast state updates to all known peers with improved error handling."""
+    broadcast_tasks = []
+    for peer in list(peers.keys()):  # Create a copy of keys to avoid runtime modification issues
+        if peer != local_ip:  # Don't broadcast to self
+            task = asyncio.create_task(send_state_to_peer(peer, state_data))
+            broadcast_tasks.append(task)
+    
+    if broadcast_tasks:
+        await asyncio.gather(*broadcast_tasks, return_exceptions=True)
 
 
+# Asynchronous function to initialize the server
 async def init_app():
     app = web.Application()
     app.router.add_post("/jsonrpc", json_rpc_handler)
     return app
 
-def run_server():
+# Start the server in a separate thread
+def run_server(port):
+    async def start_server():
+        app = await init_app()
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        print(f"Server is running on http://0.0.0.0:{port}")
+        while True:
+            await asyncio.sleep(3600)  # Keep the server running
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    app = loop.run_until_complete(init_app())
-    runner = web.AppRunner(app)
-    loop.run_until_complete(runner.setup())
-    site = web.TCPSite(runner, '0.0.0.0', 5000)
-    loop.run_until_complete(site.start())
-    server_ready.set() 
-    loop.run_forever()
+    loop.run_until_complete(start_server())
+
+def discover_peers(ip, port):
+    """Broadcast discovery messages to find peers."""
+    broadcast_address = ('<broadcast>', port)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        try:
+            s.bind((ip, 0))
+        except Exception as e:
+            print(f"Error binding to address {ip}: {e}")
+            return
+        while True:
+            try:
+                s.sendto(b"hello", broadcast_address)
+                sleep(5)
+            except Exception as e:
+                print(f"Error during peer discovery: {e}")
+                sleep(5)  # Wait before retrying
+                continue
+
+# Function to listen for other peers broadcasting on the network
+def listen_for_peers(ip, port):
+    """Listen for peer discovery messages."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.bind((ip, port))
+        while True:
+            try:
+                data, addr = s.recvfrom(1024)
+                if data == b"hello":
+                    peer_ip = addr[0]
+                    if peer_ip not in peers and peer_ip != ip:  # Avoid self-connection
+                        peers[peer_ip] = {'last_sync': 0}  # Add to peers dictionary with timestamp
+                        print(f"Discovered new peer: {peer_ip}")
+                        # Attempt to greet the new peer
+                        asyncio.run(greet_peer(peer_ip, port))
+            except Exception as e:
+                print(f"Error in peer listening: {e}")
+                sleep(1)
+
+async def greet_peer(peer_ip, port):
+    """Send a hello message to a newly discovered peer."""
+    url = f"http://{peer_ip}:{port}/jsonrpc"
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "hello",
+        "params": {"sender": local_ip},
+        "id": str(uuid.uuid4())
+    }
+    try:
+        timeout = ClientTimeout(total=5)  # 5 seconds timeout
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    print(f"Successfully connected to peer {peer_ip}")
+                    response = await resp.json()
+                    if 'result' in response and isinstance(response['result'], dict):
+                        state_data = response['result'].get('current_state')
+                        if state_data:
+                            blockchain.update_state_from_peer(state_data)
+                            print(f"Received and updated initial state from peer {peer_ip}")
+                else:
+                    print(f"Failed to connect to peer {peer_ip} with status {resp.status}")
+    except TimeoutError:
+        print(f"Timeout while connecting to peer {peer_ip}")
+        if peer_ip in peers:
+            del peers[peer_ip]
+    except ClientConnectorError:
+        print(f"Connection failed to peer {peer_ip}")
+        if peer_ip in peers:
+            del peers[peer_ip]
+    except Exception as e:
+        print(f"Error connecting to peer {peer_ip}: {e}")
+        if peer_ip in peers:
+            del peers[peer_ip]
+
+
+def select_network_interface():
+    interfaces = netifaces.interfaces()
+    print("Available network interfaces:")
+    interface_ips = []
+
+    for i, iface in enumerate(interfaces):
+        addresses = netifaces.ifaddresses(iface)
+        ip = addresses.get(netifaces.AF_INET, [{'addr': None}])[0]['addr']
+        if ip:
+            print(f"{i}. {iface} ({ip})")
+            interface_ips.append(ip)
+
+    selection = int(input("Select the interface by number: "))
+    return interface_ips[selection]
 
 
 
+# Background task to periodically sync the blockchain with peers
+def auto_sync_blockchain():
+    """Periodically synchronize the blockchain state with peers."""
+    while True:
+        try:
+            if peers:
+                print("\nInitiating blockchain state sync...")
+                # Create event loop for async operations
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                # Sync with all peers
+                for peer in list(peers.keys()):
+                    try:
+                        peer_state = loop.run_until_complete(fetch_chain_from_peer(peer))
+                        if peer_state:
+                            if blockchain.update_state_from_peer(peer_state):
+                                print(f"Successfully synchronized state with peer {peer}")
+                                # Broadcast our updated state to other peers
+                                loop.run_until_complete(broadcast_state_to_peers(peer_state))
+                    except Exception as e:
+                        print(f"Error during sync with peer {peer}: {e}")
+                        remove_inactive_peer(peer)
+                
+                loop.close()
+            
+            sleep(10)  # Sync every 10 seconds
+        except Exception as e:
+            print(f"Error in auto sync: {e}")
+            sleep(5)
 
-server_thread = threading.Thread(target=run_server)
-server_thread.start()
+# Main function to start the P2P node and blockchain
+def main():
+    global blockchain, local_ip, peers
+    port = 5000
+    local_ip = select_network_interface()
+    peers = {}  # Initialize empty peers dictionary
 
+    blockchain = Blockchain()
 
-server_ready.wait()
+    # Start all the necessary threads
+    server_thread = threading.Thread(target=run_server, args=(port,))
+    discovery_thread = threading.Thread(target=discover_peers, args=(local_ip, port))
+    listener_thread = threading.Thread(target=listen_for_peers, args=(local_ip, port))
+    sync_thread = threading.Thread(target=auto_sync_blockchain)
+
+    server_thread.start()
+    discovery_thread.start()
+    listener_thread.start()
+    sync_thread.start()
+    mining_thread = threading.Thread(target=blockchain.mine_block_periodically, daemon=True)
+    mining_thread.start()
 
 def show_menu():
     print("\nChoose an option:")
@@ -563,9 +839,8 @@ def show_menu():
 # Keep the main thread alive
 try:
     while True:
-        blockchain = Blockchain()
-        mining_thread = threading.Thread(target=blockchain.mine_block_periodically, daemon=True)
-        mining_thread.start()
+
+        main()
         while True:
             show_menu()
             choice = input("Enter your choice: ")
